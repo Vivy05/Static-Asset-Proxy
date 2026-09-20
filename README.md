@@ -1,14 +1,16 @@
-# Static Asset Proxy
+# Static Asset Platform
 
-Rust workspace for an agent-facing static artifact intake and hosting platform.
+Rust workspace for an agent-facing static site deployment platform.
 
-## Stage 0
+## Current Scope
 
-Current scope:
+Implemented so far:
 
-- create a Rust workspace
-- create app and crate skeletons
-- define shared dependencies
-- provide minimal compile-ready entrypoints
+- Rust workspace with app and crate boundaries
+- tenant and user ownership model
+- site registration and deployment use cases
+- async repository seam
+- PostgreSQL metadata repository skeleton
+- Docker PostgreSQL setup and initial migration
 
-Business logic is intentionally deferred to later stages.
+The platform targets direct static site deployment and current-state metadata management without internal build, CI, or version rollback responsibilities.

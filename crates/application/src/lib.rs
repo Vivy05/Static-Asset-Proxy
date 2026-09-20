@@ -3,89 +3,169 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use domain::{ArtifactStatus, ArtifactVersion, DomainError, RuntimeInfo, Site};
+use async_trait::async_trait;
+use domain::{DomainError, RuntimeInfo, Site, Tenant, User};
+use persistence::{RepositoryError, StaticAssetRepository};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterTenantInput {
+    pub name: String,
+    pub slug: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterUserInput {
+    pub tenant_id: Uuid,
+    pub email: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterSiteInput {
+    pub tenant_id: Uuid,
+    pub owner_user_id: Uuid,
     pub name: String,
     pub default_entry_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UploadArtifactInput {
+pub struct DeploySiteInput {
+    pub tenant_id: Uuid,
+    pub deployed_by_user_id: Uuid,
     pub site_id: Uuid,
-    pub label: String,
     pub storage_key: String,
-    pub entry_file: Option<String>,
     pub file_count: u32,
     pub total_size_bytes: u64,
-    pub overwrite_existing_label: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActivateVersionInput {
-    pub site_id: Uuid,
-    pub version_id: Uuid,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct StaticAssetService {
-    inner: Arc<RwLock<InnerState>>,
 }
 
 #[derive(Debug, Default)]
-struct InnerState {
+struct InMemoryState {
+    tenants: HashMap<Uuid, Tenant>,
+    users: HashMap<Uuid, User>,
     sites: HashMap<Uuid, Site>,
-    versions: HashMap<Uuid, ArtifactVersion>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InMemoryRepository {
+    inner: Arc<RwLock<InMemoryState>>,
 }
 
 #[derive(Debug, Error)]
 pub enum ApplicationError {
     #[error("invalid input: {0}")]
     InvalidInput(&'static str),
-    #[error("state lock poisoned")]
-    StatePoisoned,
+    #[error(transparent)]
+    Repository(#[from] RepositoryError),
     #[error(transparent)]
     Domain(#[from] DomainError),
 }
 
-impl StaticAssetService {
-    pub fn new() -> Self {
-        Self::default()
+pub struct StaticAssetService<R>
+where
+    R: StaticAssetRepository,
+{
+    repository: Arc<R>,
+}
+
+impl<R> StaticAssetService<R>
+where
+    R: StaticAssetRepository,
+{
+    pub fn new(repository: Arc<R>) -> Self {
+        Self { repository }
     }
 
-    pub fn register_site(&self, input: RegisterSiteInput) -> Result<Site, ApplicationError> {
+    pub async fn register_tenant(
+        &self,
+        input: RegisterTenantInput,
+    ) -> Result<Tenant, ApplicationError> {
+        if input.name.trim().is_empty() {
+            return Err(ApplicationError::InvalidInput(
+                "tenant name cannot be empty",
+            ));
+        }
+        if input.slug.trim().is_empty() {
+            return Err(ApplicationError::InvalidInput(
+                "tenant slug cannot be empty",
+            ));
+        }
+
+        self.repository
+            .insert_tenant(Tenant {
+                id: Uuid::new_v4(),
+                name: input.name,
+                slug: input.slug,
+            })
+            .await
+            .map_err(ApplicationError::from)
+    }
+
+    pub async fn register_user(&self, input: RegisterUserInput) -> Result<User, ApplicationError> {
+        if input.email.trim().is_empty() {
+            return Err(ApplicationError::InvalidInput("user email cannot be empty"));
+        }
+        if input.display_name.trim().is_empty() {
+            return Err(ApplicationError::InvalidInput(
+                "user display name cannot be empty",
+            ));
+        }
+        if self.repository.get_tenant(input.tenant_id).await?.is_none() {
+            return Err(DomainError::TenantNotFound(input.tenant_id).into());
+        }
+
+        self.repository
+            .insert_user(User {
+                id: Uuid::new_v4(),
+                tenant_id: input.tenant_id,
+                email: input.email,
+                display_name: input.display_name,
+            })
+            .await
+            .map_err(ApplicationError::from)
+    }
+
+    pub async fn register_site(&self, input: RegisterSiteInput) -> Result<Site, ApplicationError> {
         if input.name.trim().is_empty() {
             return Err(ApplicationError::InvalidInput("site name cannot be empty"));
         }
+        let tenant = self
+            .repository
+            .get_tenant(input.tenant_id)
+            .await?
+            .ok_or(DomainError::TenantNotFound(input.tenant_id))?;
+        let owner = self
+            .repository
+            .get_user(input.owner_user_id)
+            .await?
+            .ok_or(DomainError::UserNotFound(input.owner_user_id))?;
+        if owner.tenant_id != tenant.id {
+            return Err(DomainError::UserTenantMismatch {
+                tenant_id: tenant.id,
+                user_id: owner.id,
+            }
+            .into());
+        }
 
-        let site = Site {
-            id: Uuid::new_v4(),
-            name: input.name,
-            default_entry_path: input.default_entry_path.unwrap_or_else(|| "/".to_string()),
-            active_version_id: None,
-        };
-
-        let mut state = self
-            .inner
-            .write()
-            .map_err(|_| ApplicationError::StatePoisoned)?;
-        state.sites.insert(site.id, site.clone());
-        Ok(site)
+        self.repository
+            .insert_site(Site {
+                id: Uuid::new_v4(),
+                tenant_id: input.tenant_id,
+                owner_user_id: input.owner_user_id,
+                name: input.name,
+                default_entry_path: input.default_entry_path.unwrap_or_else(|| "/".to_string()),
+                file_count: 0,
+                total_size_bytes: 0,
+                storage_key: None,
+                deployed_by_user_id: None,
+            })
+            .await
+            .map_err(ApplicationError::from)
     }
 
-    pub fn upload_artifact(
-        &self,
-        input: UploadArtifactInput,
-    ) -> Result<ArtifactVersion, ApplicationError> {
-        if input.label.trim().is_empty() {
-            return Err(ApplicationError::InvalidInput(
-                "artifact label cannot be empty",
-            ));
-        }
+    pub async fn deploy_site(&self, input: DeploySiteInput) -> Result<Site, ApplicationError> {
         if input.storage_key.trim().is_empty() {
             return Err(ApplicationError::InvalidInput(
                 "storage key cannot be empty",
@@ -93,264 +173,256 @@ impl StaticAssetService {
         }
         if input.file_count == 0 {
             return Err(ApplicationError::InvalidInput(
-                "artifact file count must be greater than zero",
+                "deployed file count must be greater than zero",
             ));
         }
         if input.total_size_bytes == 0 {
             return Err(ApplicationError::InvalidInput(
-                "artifact total size must be greater than zero",
+                "deployed total size must be greater than zero",
             ));
         }
 
-        let mut state = self
-            .inner
-            .write()
-            .map_err(|_| ApplicationError::StatePoisoned)?;
-        if !state.sites.contains_key(&input.site_id) {
-            return Err(DomainError::SiteNotFound(input.site_id).into());
-        }
-
-        if !input.overwrite_existing_label
-            && state
-                .versions
-                .values()
-                .any(|version| version.site_id == input.site_id && version.label == input.label)
-        {
-            return Err(DomainError::DuplicateArtifactLabel {
-                site_id: input.site_id,
-                label: input.label,
+        let user = self
+            .repository
+            .get_user(input.deployed_by_user_id)
+            .await?
+            .ok_or(DomainError::UserNotFound(input.deployed_by_user_id))?;
+        if user.tenant_id != input.tenant_id {
+            return Err(DomainError::UserTenantMismatch {
+                tenant_id: input.tenant_id,
+                user_id: user.id,
             }
             .into());
         }
 
-        let version = ArtifactVersion {
-            id: Uuid::new_v4(),
-            site_id: input.site_id,
-            label: input.label,
-            storage_key: input.storage_key,
-            entry_file: input.entry_file.unwrap_or_else(|| "index.html".to_string()),
-            file_count: input.file_count,
-            total_size_bytes: input.total_size_bytes,
-            status: ArtifactStatus::Uploaded,
-        };
-
-        state.versions.insert(version.id, version.clone());
-        Ok(version)
-    }
-
-    pub fn activate_version(
-        &self,
-        input: ActivateVersionInput,
-    ) -> Result<RuntimeInfo, ApplicationError> {
-        let mut state = self
-            .inner
-            .write()
-            .map_err(|_| ApplicationError::StatePoisoned)?;
-        let version = state
-            .versions
-            .get(&input.version_id)
-            .cloned()
-            .ok_or(DomainError::ArtifactVersionNotFound(input.version_id))?;
-
-        if version.site_id != input.site_id {
-            return Err(DomainError::VersionSiteMismatch {
-                site_id: input.site_id,
-                version_id: input.version_id,
-            }
-            .into());
-        }
-
-        let site = state
-            .sites
-            .get_mut(&input.site_id)
+        let mut site = self
+            .repository
+            .get_site(input.site_id)
+            .await?
             .ok_or(DomainError::SiteNotFound(input.site_id))?;
-
-        for item in state.versions.values_mut() {
-            if item.site_id == input.site_id && item.status == ArtifactStatus::Active {
-                item.status = ArtifactStatus::Superseded;
+        if site.tenant_id != input.tenant_id {
+            return Err(DomainError::SiteTenantMismatch {
+                tenant_id: input.tenant_id,
+                site_id: input.site_id,
             }
+            .into());
         }
 
-        if let Some(item) = state.versions.get_mut(&input.version_id) {
-            item.status = ArtifactStatus::Active;
-        }
+        site.storage_key = Some(input.storage_key);
+        site.file_count = input.file_count;
+        site.total_size_bytes = input.total_size_bytes;
+        site.deployed_by_user_id = Some(input.deployed_by_user_id);
 
-        site.active_version_id = Some(input.version_id);
-        build_runtime_info(&state, input.site_id)
+        self.repository
+            .update_site(site)
+            .await
+            .map_err(ApplicationError::from)
     }
 
-    pub fn get_runtime_info(&self, site_id: Uuid) -> Result<RuntimeInfo, ApplicationError> {
-        let state = self
-            .inner
-            .read()
-            .map_err(|_| ApplicationError::StatePoisoned)?;
-        build_runtime_info(&state, site_id)
-    }
+    pub async fn get_runtime_info(&self, site_id: Uuid) -> Result<RuntimeInfo, ApplicationError> {
+        let site = self
+            .repository
+            .get_site(site_id)
+            .await?
+            .ok_or(DomainError::SiteNotFound(site_id))?;
 
-    pub fn list_site_versions(
-        &self,
-        site_id: Uuid,
-    ) -> Result<Vec<ArtifactVersion>, ApplicationError> {
-        let state = self
-            .inner
-            .read()
-            .map_err(|_| ApplicationError::StatePoisoned)?;
-        let runtime = build_runtime_info(&state, site_id)?;
-        Ok(runtime.versions)
+        Ok(RuntimeInfo { site })
     }
 }
 
-fn build_runtime_info(state: &InnerState, site_id: Uuid) -> Result<RuntimeInfo, ApplicationError> {
-    let site = state
-        .sites
-        .get(&site_id)
-        .cloned()
-        .ok_or(DomainError::SiteNotFound(site_id))?;
+impl InMemoryRepository {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
-    let mut versions = state
-        .versions
-        .values()
-        .filter(|version| version.site_id == site_id)
-        .cloned()
-        .collect::<Vec<_>>();
-    versions.sort_by_key(|version| version.label.clone());
+#[async_trait]
+impl StaticAssetRepository for InMemoryRepository {
+    async fn get_tenant(&self, tenant_id: Uuid) -> Result<Option<Tenant>, RepositoryError> {
+        let state = self
+            .inner
+            .read()
+            .map_err(|_| RepositoryError::Unavailable("state lock poisoned"))?;
+        Ok(state.tenants.get(&tenant_id).cloned())
+    }
 
-    let active_version = site
-        .active_version_id
-        .and_then(|active_id| state.versions.get(&active_id).cloned());
+    async fn get_user(&self, user_id: Uuid) -> Result<Option<User>, RepositoryError> {
+        let state = self
+            .inner
+            .read()
+            .map_err(|_| RepositoryError::Unavailable("state lock poisoned"))?;
+        Ok(state.users.get(&user_id).cloned())
+    }
 
-    Ok(RuntimeInfo {
-        site,
-        active_version,
-        versions,
-    })
+    async fn insert_tenant(&self, tenant: Tenant) -> Result<Tenant, RepositoryError> {
+        let mut state = self
+            .inner
+            .write()
+            .map_err(|_| RepositoryError::Unavailable("state lock poisoned"))?;
+        state.tenants.insert(tenant.id, tenant.clone());
+        Ok(tenant)
+    }
+
+    async fn insert_user(&self, user: User) -> Result<User, RepositoryError> {
+        let mut state = self
+            .inner
+            .write()
+            .map_err(|_| RepositoryError::Unavailable("state lock poisoned"))?;
+        state.users.insert(user.id, user.clone());
+        Ok(user)
+    }
+
+    async fn insert_site(&self, site: Site) -> Result<Site, RepositoryError> {
+        let mut state = self
+            .inner
+            .write()
+            .map_err(|_| RepositoryError::Unavailable("state lock poisoned"))?;
+        state.sites.insert(site.id, site.clone());
+        Ok(site)
+    }
+
+    async fn get_site(&self, site_id: Uuid) -> Result<Option<Site>, RepositoryError> {
+        let state = self
+            .inner
+            .read()
+            .map_err(|_| RepositoryError::Unavailable("state lock poisoned"))?;
+        Ok(state.sites.get(&site_id).cloned())
+    }
+
+    async fn update_site(&self, site: Site) -> Result<Site, RepositoryError> {
+        let mut state = self
+            .inner
+            .write()
+            .map_err(|_| RepositoryError::Unavailable("state lock poisoned"))?;
+        state.sites.insert(site.id, site.clone());
+        Ok(site)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivateVersionInput, RegisterSiteInput, StaticAssetService, UploadArtifactInput};
-    use domain::{ArtifactStatus, DomainError};
+    use std::sync::Arc;
 
-    #[test]
-    fn activates_uploaded_version_and_exposes_runtime_info() {
-        let service = StaticAssetService::new();
+    use super::{
+        DeploySiteInput, InMemoryRepository, RegisterSiteInput, RegisterTenantInput,
+        RegisterUserInput, StaticAssetService,
+    };
+    use domain::DomainError;
+
+    #[tokio::test]
+    async fn deploys_site_and_exposes_runtime_info() {
+        let service = StaticAssetService::new(Arc::new(InMemoryRepository::new()));
+        let tenant = service
+            .register_tenant(RegisterTenantInput {
+                name: "Acme".to_string(),
+                slug: "acme".to_string(),
+            })
+            .await
+            .expect("tenant registration should succeed");
+        let user = service
+            .register_user(RegisterUserInput {
+                tenant_id: tenant.id,
+                email: "ops@acme.test".to_string(),
+                display_name: "Acme Ops".to_string(),
+            })
+            .await
+            .expect("user registration should succeed");
         let site = service
             .register_site(RegisterSiteInput {
+                tenant_id: tenant.id,
+                owner_user_id: user.id,
                 name: "docs".to_string(),
                 default_entry_path: Some("/".to_string()),
             })
+            .await
             .expect("site registration should succeed");
 
-        let version = service
-            .upload_artifact(UploadArtifactInput {
+        let deployed = service
+            .deploy_site(DeploySiteInput {
+                tenant_id: tenant.id,
+                deployed_by_user_id: user.id,
                 site_id: site.id,
-                label: "v1".to_string(),
-                storage_key: "site/docs/v1".to_string(),
-                entry_file: Some("index.html".to_string()),
+                storage_key: "site/docs/current".to_string(),
                 file_count: 3,
                 total_size_bytes: 2048,
-                overwrite_existing_label: false,
             })
-            .expect("artifact upload should succeed");
+            .await
+            .expect("site deploy should succeed");
 
         let runtime = service
-            .activate_version(ActivateVersionInput {
-                site_id: site.id,
-                version_id: version.id,
-            })
-            .expect("activation should succeed");
+            .get_runtime_info(site.id)
+            .await
+            .expect("runtime info should succeed");
 
-        assert_eq!(runtime.site.active_version_id, Some(version.id));
-        assert_eq!(
-            runtime
-                .active_version
-                .expect("runtime should expose active version")
-                .status,
-            ArtifactStatus::Active
-        );
+        assert_eq!(deployed.storage_key.as_deref(), Some("site/docs/current"));
+        assert_eq!(runtime.site.file_count, 3);
+        assert_eq!(runtime.site.total_size_bytes, 2048);
     }
 
-    #[test]
-    fn rejects_duplicate_artifact_labels_without_override() {
-        let service = StaticAssetService::new();
+    #[tokio::test]
+    async fn rejects_deploy_when_user_is_outside_tenant() {
+        let service = StaticAssetService::new(Arc::new(InMemoryRepository::new()));
+        let tenant_a = service
+            .register_tenant(RegisterTenantInput {
+                name: "Acme".to_string(),
+                slug: "acme".to_string(),
+            })
+            .await
+            .expect("tenant registration should succeed");
+        let tenant_b = service
+            .register_tenant(RegisterTenantInput {
+                name: "Beta".to_string(),
+                slug: "beta".to_string(),
+            })
+            .await
+            .expect("tenant registration should succeed");
+        let owner = service
+            .register_user(RegisterUserInput {
+                tenant_id: tenant_a.id,
+                email: "owner@acme.test".to_string(),
+                display_name: "Owner".to_string(),
+            })
+            .await
+            .expect("user registration should succeed");
+        let outsider = service
+            .register_user(RegisterUserInput {
+                tenant_id: tenant_b.id,
+                email: "ops@beta.test".to_string(),
+                display_name: "Beta Ops".to_string(),
+            })
+            .await
+            .expect("user registration should succeed");
         let site = service
             .register_site(RegisterSiteInput {
-                name: "landing".to_string(),
-                default_entry_path: Some("/".to_string()),
+                tenant_id: tenant_a.id,
+                owner_user_id: owner.id,
+                name: "docs".to_string(),
+                default_entry_path: None,
             })
+            .await
             .expect("site registration should succeed");
 
-        let first = service.upload_artifact(UploadArtifactInput {
-            site_id: site.id,
-            label: "release-1".to_string(),
-            storage_key: "site/landing/release-1".to_string(),
-            entry_file: None,
-            file_count: 2,
-            total_size_bytes: 1024,
-            overwrite_existing_label: false,
-        });
-        assert!(first.is_ok(), "first upload should succeed");
-
-        let duplicate = service
-            .upload_artifact(UploadArtifactInput {
+        let result = service
+            .deploy_site(DeploySiteInput {
+                tenant_id: tenant_a.id,
+                deployed_by_user_id: outsider.id,
                 site_id: site.id,
-                label: "release-1".to_string(),
-                storage_key: "site/landing/release-1b".to_string(),
-                entry_file: None,
-                file_count: 2,
-                total_size_bytes: 1024,
-                overwrite_existing_label: false,
+                storage_key: "site/docs/current".to_string(),
+                file_count: 1,
+                total_size_bytes: 128,
             })
-            .expect_err("duplicate label should fail");
+            .await
+            .expect_err("cross tenant deploy should fail");
 
-        match duplicate {
-            super::ApplicationError::Domain(DomainError::DuplicateArtifactLabel {
-                site_id,
-                label,
+        match result {
+            super::ApplicationError::Domain(DomainError::UserTenantMismatch {
+                tenant_id,
+                user_id,
             }) => {
-                assert_eq!(site_id, site.id);
-                assert_eq!(label, "release-1");
+                assert_eq!(tenant_id, tenant_a.id);
+                assert_eq!(user_id, outsider.id);
             }
             other => panic!("unexpected error: {other}"),
         }
-    }
-
-    #[test]
-    fn allows_duplicate_artifact_label_when_override_flag_is_enabled() {
-        let service = StaticAssetService::new();
-        let site = service
-            .register_site(RegisterSiteInput {
-                name: "portal".to_string(),
-                default_entry_path: Some("/".to_string()),
-            })
-            .expect("site registration should succeed");
-
-        service
-            .upload_artifact(UploadArtifactInput {
-                site_id: site.id,
-                label: "preview".to_string(),
-                storage_key: "site/portal/preview-1".to_string(),
-                entry_file: None,
-                file_count: 4,
-                total_size_bytes: 4096,
-                overwrite_existing_label: false,
-            })
-            .expect("first upload should succeed");
-
-        let duplicate = service
-            .upload_artifact(UploadArtifactInput {
-                site_id: site.id,
-                label: "preview".to_string(),
-                storage_key: "site/portal/preview-2".to_string(),
-                entry_file: None,
-                file_count: 5,
-                total_size_bytes: 8192,
-                overwrite_existing_label: true,
-            })
-            .expect("override upload should succeed");
-
-        assert_eq!(duplicate.label, "preview");
-        assert_eq!(duplicate.file_count, 5);
-        assert_eq!(duplicate.total_size_bytes, 8192);
     }
 }

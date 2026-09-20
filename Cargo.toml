@@ -8,14 +8,7 @@ members = [
     "crates/observability",
     "crates/domain",
     "crates/application",
-    "crates/tool-runtime",
-    "crates/site-registry",
-    "crates/artifact-catalog",
-    "crates/routing-runtime",
-    "crates/upload-ingress",
     "crates/persistence",
-    "crates/storage-adapters",
-    "crates/edge-adapters",
 ]
 resolver = "2"
 
@@ -26,8 +19,10 @@ version = "0.1.0"
 
 [workspace.dependencies]
 anyhow = "1.0.98"
+async-trait = "0.1.89"
 axum = "0.8.4"
 serde = { version = "1.0.219", features = ["derive"] }
+sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio-rustls", "uuid"] }
 thiserror = "2.0.12"
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "signal"] }
 tracing = "0.1.41"
