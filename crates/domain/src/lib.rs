@@ -1,3 +1,5 @@
+pub mod file_validation;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
