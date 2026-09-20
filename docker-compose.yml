@@ -1,0 +1,18 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: static-asset-proxy-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: static_asset_proxy
+      POSTGRES_USER: static_asset_proxy
+      POSTGRES_PASSWORD: static_asset_proxy
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  postgres-data:
