@@ -20,6 +20,9 @@ pub struct UploadArtifactInput {
     pub label: String,
     pub storage_key: String,
     pub entry_file: Option<String>,
+    pub file_count: u32,
+    pub total_size_bytes: u64,
+    pub overwrite_existing_label: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +91,16 @@ impl StaticAssetService {
                 "storage key cannot be empty",
             ));
         }
+        if input.file_count == 0 {
+            return Err(ApplicationError::InvalidInput(
+                "artifact file count must be greater than zero",
+            ));
+        }
+        if input.total_size_bytes == 0 {
+            return Err(ApplicationError::InvalidInput(
+                "artifact total size must be greater than zero",
+            ));
+        }
 
         let mut state = self
             .inner
@@ -97,12 +110,27 @@ impl StaticAssetService {
             return Err(DomainError::SiteNotFound(input.site_id).into());
         }
 
+        if !input.overwrite_existing_label
+            && state
+                .versions
+                .values()
+                .any(|version| version.site_id == input.site_id && version.label == input.label)
+        {
+            return Err(DomainError::DuplicateArtifactLabel {
+                site_id: input.site_id,
+                label: input.label,
+            }
+            .into());
+        }
+
         let version = ArtifactVersion {
             id: Uuid::new_v4(),
             site_id: input.site_id,
             label: input.label,
             storage_key: input.storage_key,
             entry_file: input.entry_file.unwrap_or_else(|| "index.html".to_string()),
+            file_count: input.file_count,
+            total_size_bytes: input.total_size_bytes,
             status: ArtifactStatus::Uploaded,
         };
 
@@ -201,7 +229,7 @@ fn build_runtime_info(state: &InnerState, site_id: Uuid) -> Result<RuntimeInfo, 
 #[cfg(test)]
 mod tests {
     use super::{ActivateVersionInput, RegisterSiteInput, StaticAssetService, UploadArtifactInput};
-    use domain::ArtifactStatus;
+    use domain::{ArtifactStatus, DomainError};
 
     #[test]
     fn activates_uploaded_version_and_exposes_runtime_info() {
@@ -219,6 +247,9 @@ mod tests {
                 label: "v1".to_string(),
                 storage_key: "site/docs/v1".to_string(),
                 entry_file: Some("index.html".to_string()),
+                file_count: 3,
+                total_size_bytes: 2048,
+                overwrite_existing_label: false,
             })
             .expect("artifact upload should succeed");
 
@@ -237,5 +268,89 @@ mod tests {
                 .status,
             ArtifactStatus::Active
         );
+    }
+
+    #[test]
+    fn rejects_duplicate_artifact_labels_without_override() {
+        let service = StaticAssetService::new();
+        let site = service
+            .register_site(RegisterSiteInput {
+                name: "landing".to_string(),
+                default_entry_path: Some("/".to_string()),
+            })
+            .expect("site registration should succeed");
+
+        let first = service.upload_artifact(UploadArtifactInput {
+            site_id: site.id,
+            label: "release-1".to_string(),
+            storage_key: "site/landing/release-1".to_string(),
+            entry_file: None,
+            file_count: 2,
+            total_size_bytes: 1024,
+            overwrite_existing_label: false,
+        });
+        assert!(first.is_ok(), "first upload should succeed");
+
+        let duplicate = service
+            .upload_artifact(UploadArtifactInput {
+                site_id: site.id,
+                label: "release-1".to_string(),
+                storage_key: "site/landing/release-1b".to_string(),
+                entry_file: None,
+                file_count: 2,
+                total_size_bytes: 1024,
+                overwrite_existing_label: false,
+            })
+            .expect_err("duplicate label should fail");
+
+        match duplicate {
+            super::ApplicationError::Domain(DomainError::DuplicateArtifactLabel {
+                site_id,
+                label,
+            }) => {
+                assert_eq!(site_id, site.id);
+                assert_eq!(label, "release-1");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn allows_duplicate_artifact_label_when_override_flag_is_enabled() {
+        let service = StaticAssetService::new();
+        let site = service
+            .register_site(RegisterSiteInput {
+                name: "portal".to_string(),
+                default_entry_path: Some("/".to_string()),
+            })
+            .expect("site registration should succeed");
+
+        service
+            .upload_artifact(UploadArtifactInput {
+                site_id: site.id,
+                label: "preview".to_string(),
+                storage_key: "site/portal/preview-1".to_string(),
+                entry_file: None,
+                file_count: 4,
+                total_size_bytes: 4096,
+                overwrite_existing_label: false,
+            })
+            .expect("first upload should succeed");
+
+        let duplicate = service
+            .upload_artifact(UploadArtifactInput {
+                site_id: site.id,
+                label: "preview".to_string(),
+                storage_key: "site/portal/preview-2".to_string(),
+                entry_file: None,
+                file_count: 5,
+                total_size_bytes: 8192,
+                overwrite_existing_label: true,
+            })
+            .expect("override upload should succeed");
+
+        assert_eq!(duplicate.label, "preview");
+        assert_eq!(duplicate.file_count, 5);
+        assert_eq!(duplicate.total_size_bytes, 8192);
     }
 }

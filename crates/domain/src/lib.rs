@@ -17,6 +17,8 @@ pub struct ArtifactVersion {
     pub label: String,
     pub storage_key: String,
     pub entry_file: String,
+    pub file_count: u32,
+    pub total_size_bytes: u64,
     pub status: ArtifactStatus,
 }
 
@@ -42,4 +44,6 @@ pub enum DomainError {
     ArtifactVersionNotFound(Uuid),
     #[error("artifact version {version_id} does not belong to site {site_id}")]
     VersionSiteMismatch { site_id: Uuid, version_id: Uuid },
+    #[error("artifact label already exists for site {site_id}: {label}")]
+    DuplicateArtifactLabel { site_id: Uuid, label: String },
 }
