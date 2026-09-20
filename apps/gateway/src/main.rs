@@ -9,16 +9,14 @@ async fn main() {
     init_tracing();
 
     let settings = ServerSettings::new("127.0.0.1:4000");
-    info!(app = APP_NAME, addr = %settings.addr, "starting gateway stage 0");
+    info!(app = APP_NAME, addr = %settings.addr, "starting gateway");
 
     let app = Router::new().route("/healthz", get(healthz));
     let listener = tokio::net::TcpListener::bind(&settings.addr)
         .await
-        .expect("stage 0 listener bind must succeed");
+        .expect("listener bind must succeed");
 
-    axum::serve(listener, app)
-        .await
-        .expect("stage 0 server must serve");
+    axum::serve(listener, app).await.expect("server must serve");
 }
 
 async fn healthz() -> &'static str {
