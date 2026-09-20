@@ -5,12 +5,16 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+application = { path = "../../crates/application" }
 axum.workspace = true
 common = { path = "../../crates/common" }
+domain = { path = "../../crates/domain" }
 observability = { path = "../../crates/observability" }
+serde.workspace = true
 settings = { path = "../../crates/settings" }
 tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true
