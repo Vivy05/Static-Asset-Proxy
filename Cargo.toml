@@ -1,0 +1,43 @@
+[workspace]
+members = [
+    "apps/mcp-server",
+    "apps/gateway",
+    "apps/worker",
+    "crates/common",
+    "crates/settings",
+    "crates/observability",
+    "crates/domain",
+    "crates/application",
+    "crates/tool-runtime",
+    "crates/site-registry",
+    "crates/artifact-catalog",
+    "crates/routing-runtime",
+    "crates/upload-ingress",
+    "crates/persistence",
+    "crates/storage-adapters",
+    "crates/edge-adapters",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0.98"
+axum = "0.8.4"
+serde = { version = "1.0.219", features = ["derive"] }
+thiserror = "2.0.12"
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "signal"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
+uuid = { version = "1.18.1", features = ["serde", "v4"] }
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
